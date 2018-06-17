@@ -1,0 +1,525 @@
+ex)
+... where dept_id = 10 → 3/100
+... where dept_id = 20 → 2/100
+... where dept_id = 30 → 95/100(값의 분포도가 높아서 index로 걸려 있어도 full table scan이 더 낫다)
+
+* 히스토그램을 통해 값의 분포가 분균등할 수 있음을 참고해서 계획수립이 된다.
+
+
+oracle에서는 값의 분포도는 균등하다고 생각하게 설정되어 있다.
+
+random I/O : 1건의 데이터를 찾고자 1개의 블럭을 방문하는 행위
+
+multiblock scan : full table scan, index fast full scan
+
+통계수집을 통해 sort가 발생이 된다. 
+
+
+-- 변수처리가 되어 있으면 값의 분포도를 고려해서 표현해야 한다.
+
+=============================================================================================
+
+/* index skip scan(p.11) */
+
+ex) 
+... where 성별 = '남'
+and 급여 >= 10000;
+
+성별은 부등호 안 되지만, 급여는 범위스캔을 주로 실시
+
+조합인덱스 선행컬럼은 = 가 좋다.(여기선 성별)
+
+create index...
+on 사원(성별, 급여)
+
+이때
+
+... where 급여 >= 10000;
+
+만 작성(개발자 실수)되었다면 (8i 버전까지는 index scan 할수 없지만, 그 이후 버전부터)
+
+성별에 대한 부분은 skip하고 위에서 생성한 index를 탈 수 있도록 한 것이 skip scan이라고 한다. 
+
+(남자 & 급여 >= 10000  + 여자 & 급여 >= 10000 인 row값이 출력되기 위해
+
+ inlist iterator. select 문장 2개 만들어짐(index 타는 게 더 좋기 때문에)
+
+위에서 누락된 문장을 추가한다면 아래와 같다.
+
+... where 성별 in('남','여')
+and 급여 >= 10000;
+
+요약 : 중복성이 있는 선행컬럼이 조건절에서 누락이 되었을 경우 skip scan이 돌아간다.
+
+(단, 앞의 컬럼이 중복성이 별로 없으면, 예를 들어 last_name 같은 경우엔 skip scan 안 돌아감)
+
+선행컬럼의 키 값의 개수가 몇개인지(distinct 키워드, histogram) 가지고 optimizer가 판단한다.(통계수집에서 나옴)
+
+
+=============================================================================================
+
+
+데이터웨어하우징 - 고객 설문지
+
+..id......... 성별 | 결혼여부 | 자동차보유여부
+             
+                남        기 혼                Y                <-- 시작 rowid
+                여        기 혼                N 
+                남        미 혼                Y 
+ 100          남        기 혼                N 
+                남        미 혼                Y 
+                남        기 혼                N 
+                여        기 혼                Y 
+                 :            :                    :                 <-- 끝 rowid
+
+성별 : 남, 여, null
+
+ OLTP(select, DML) 업무에 적합 : B*tree에서 index 거는 경우는 유일키값들이 있을 때
+                                               (구조상 null을 포함하지 않음 따라서 index 있더라도 full로 처리)
+
+ DW(select) 업무에 적합 : bitmap은 중복성값이 많을 경우에 index
+
+
+create bitmap index 고객T_성별_idx
+on 고객T(성별);
+(도식)
+ root : 남 여 null
+
+
+ex)
+select *
+from 고객T
+where 성별 = '남'
+and 결혼여부 = '기혼'
+and 자동차여부 = 'Y';
+
+ex)
+update 고객T
+set 성별 = null
+where id = 100;
+
+bitmap경우 update시 테이블 레벨 락이 걸린다.(b*tree : row level lock)
+
+
+
+※ 한 테이블에 컬럼별 index는 다르게 걸릴 수 있다. (id : b*tree, sex : bitmap)
+
+※ 계정계 DB: 낮시간에 쓰는 고객테이블
+    정보계 DB: 밤시간에 (분석팀) 쓰는 테이블.(현재 데이터가 아님) 현재 데이터를 분석해야 하면 계정계에 요청
+
+
+=============================================================================================
+
+
+access : rowid알아서 바로 간다
+filter : 어디있는지 몰라 직접 찾으러 간다
+
+
+index는 표현식 및 형변환 사용하면 index 못 탐
+
+
+=============================================================================================
+
+조인(JOIN)
+select e.*, d.*
+from emp e, dept d
+where e.dept_id = d.dept_id	-- 조인조건술어
+and e.id = 100;			-- 비조인조건술어
+id에 index 안걸려있으면 비조인조건술어가 먼저 돌아가지 않음.(filter 술어)
+성능이 좋게 하려면 id에 index를 걸어야 함. 
+create unique index ~~~
+on hr.emp(id);
+index 만들어짐 -> root block, branch block, leaf block(id | rowid) 
+emp table		 /		 dept table
+인덱스 걸고 나면 e.id 가 access술어가 됨. 
+일단 인덱스를 타야 함. root > branch > leaf 로 가서 id = 100을 찾아 rowid를 찾아감. (100번사원의 정보를 얻기 위해. 그리고 조인시킬 dept_id 를 얻기 위해) -> active set 결과 만듬. 얻은 dept_id 로 dept 테이블에서 정보 찾으려면. dept_id index 없으면 filter 술어로 한 row 씩 확인. dept_id 컬럼에 index 걸어놨으면 마찬가지로 root > branch > leaf 를 통해 dept_id = 10 인 rowid를 찾아감(access술어로 찾음). 
+
+#요약 : 조인의 성능이 좋으려면 비조인조건 술어의 컬럼, 조인조건술어의 컬럼 둘다 인덱스 있어야 함.
+
+
+
+main loop : emp table의 데이터를 찾아가는 과정(id index의 root> branch> leaf> emp table의 루프)
+sub loop : dept table의 데이터를 찾아가는 과정(dept_id index의 root> branch> leaf> dept table 루프)
+sub loop 가 돌아가는 횟수는 main loop의 데이터 개수만큼임. dept_id 인덱스 없으면 main loop의 row 개수만큼 풀스캔 돌아감. 비조인조건술어에 들어간 테이블이 (해당 컬럼에 인덱스가 걸려있다면) main loop의 대상이 됨(?). (둘다 인덱스 걸려있다는 전제에) 동시에 양쪽 leaf block에 buffer pinning.
+
+select e.*, d.*
+from emp e, dept d
+where e.dept_id = d.dept_id	
+and d.loc = 1500
+and e.flag = ‘y’; 			-- filter 술어
+이 경우에 loc가 중복성이 적으므로 dept table을 outer로 삼는 게 더 좋음. 
+앞에서와 같은 과정으로 (그러나 loc = 1500 -> 조인 -> flag = y 순으로) 찾아서 active set 결과 만듬.
+filter 술어는 random i/o발생. 필요없는 정보를 일부러 찾아가게 되는 일이 발생. 메모리에 없으면 디스크에서 읽어서 data buffer cache에 (원래 있던 정보 밀어내고) 올려야 하므로 좋지 않음.
+이런 경우 조합인덱스 필요. 선행컬럼은 dept_id, 후행컬럼은 flag. 
+create index emp_dept_flag_idx
+on hr.emp(dept_id, flag);
+이렇게 조합인덱스 만들어놓으면, loc index를 통해 dept 테이블의 d.loc = 1500 를 찾아간 뒤 조합인덱스를 통해 (emp 테이블의) 실제 블락을 찾아감. 찾아서 active set 결과에 올림.
+이런 것이 nested loop join.
+
+
+=============================================================================================
+
+
+ 『 nested_loop 』
+
+SQL> set serveroutput on 
+
+SQL> begin 
+       for outer in (select employee_id, last_name, department_id from employees) loop
+               for inner in (select department_name from departments where department_id = outer.department_id)  loop
+                       dbms_output.put_line(outer.employee_id ||' '||outer.last_name||' '||inner.department_name);
+               end loop;
+       end loop;
+     end;
+    /
+
+PL/SQL procedure successfully completed.
+
+
+nested loop join 
+
+- 조인되는 건수가 적을때 유리하다. 인덱스를 통해서 데이터를 엑세스해서 조인
+- 힌트 : use_nl(조인의 방법), ordered(조인의 순서를 제어), leading(조인의 순서를 제어)
+
+
+SQL> alter session set statistics_level = all;
+
+Session altered.
+
+SQL> SELECT /*+ use_nl(e,d) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM departments d, employees e
+WHERE d.department_id = e.department_id 
+AND e.employee_id = 100;
+
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+-----------------------------------------------------------------------------------------------------------
+SQL_ID  c7bquncn44tvf, child number 0
+-------------------------------------
+
+/* use_nl() : 조인의 방법 */
+
+SELECT /*+ use_nl(e,d) */ e.last_name, e.first_name, e.salary,
+e.job_id, d.department_name FROM departments d, employees e WHERE
+d.department_id = e.department_id AND e.employee_id = 100
+
+Plan hash value: 2782876085
+
+--------------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name          | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+--------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |               |      1 |        |      1 |00:00:00.01 |       4 |
+|   1 |  NESTED LOOPS                |               |      1 |      1 |      1 |00:00:00.01 |       4 |
+|   2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEES     |      1 |      1 |      1 |00:00:00.01 |       2 |  --> OUTER / DRIVING
+|*  3 |    INDEX UNIQUE SCAN         | EMP_EMP_ID_PK |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   4 |   TABLE ACCESS BY INDEX ROWID| DEPARTMENTS   |      1 |     27 |      1 |00:00:00.01 |       2 |  --> INNER / DRIVEN
+|*  5 |    INDEX UNIQUE SCAN         | DEPT_ID_PK    |      1 |      1 |      1 |00:00:00.01 |       1 |
+--------------------------------------------------------------------------------------------------------
+※ 순서 : 3 → 2 → 5 → 4 → 1 → 0
+
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("E"."EMPLOYEE_ID"=100) /* rowid 찾기위해 */
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID") /* e.department_id 에서 찾아감 */
+
+* E-Rows(몇개의 row를 처리할까 예측)
+* A-Rows(실제 처리한 row수)
+
+
+
+/* ordered use_nl(inner) : 조인의 순서를 결정하는 힌트인데 from 절에 나열된 테이블 순서대로 읽어라 */
+
+SQL> SELECT /*+ ordered use_nl(d) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d                                   <-- 주의 : 여기 순서대로 풀어
+WHERE d.department_id = e.department_id 
+AND e.employee_id = 100;  
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------------------------
+SQL_ID  377c8pnbupxsj, child number 0
+-------------------------------------
+SELECT /*+ ordered use_nl(d) */ e.last_name, e.first_name, e.salary,
+e.job_id, d.department_name FROM employees e, departments d WHERE
+d.department_id = e.department_id AND e.employee_id = 100
+
+Plan hash value: 2782876085
+
+--------------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name          | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+--------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |               |      1 |        |      1 |00:00:00.01 |       4 |
+|   1 |  NESTED LOOPS                |               |      1 |      1 |      1 |00:00:00.01 |       4 |
+|   2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEES     |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  3 |    INDEX UNIQUE SCAN         | EMP_EMP_ID_PK |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   4 |   TABLE ACCESS BY INDEX ROWID| DEPARTMENTS   |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  5 |    INDEX UNIQUE SCAN         | DEPT_ID_PK    |      1 |      1 |      1 |00:00:00.01 |       1 |
+--------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("E"."EMPLOYEE_ID"=100)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+
+ex)
+select /*+ ordered use_nl(l) use_nl(d) */
+e.last_name, e.first_name, e.salary, e.job_id, d.department_name, l.city
+from employees e, departments d, locations l
+where d.department_id = e.department_id
+and d.location_id = l.location_id
+and e.employee_id = 100;
+
+
+select /*+ leading(e,d,l) use_nl(d) use_nl(l) */
+e.last_name, e.first_name, e.salary, e.job_id, d.department_name, l.city
+from employees e, departments d, locations l
+where d.department_id = e.department_id
+and d.location_id = l.location_id
+and e.employee_id = 100;
+
+
+/* leading(1st, 2nd ) use_nl(inner) 에 순서를 제어할 수 있도록 지정 */
+
+SQL> SELECT /*+ leading(e,d) use_nl(d) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d 
+WHERE d.department_id = e.department_id 
+AND e.employee_id = 100;
+
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last')); 
+
+PLAN_TABLE_OUTPUT
+---------------------------------------------------------------------------------------------------------------
+SQL_ID  9grt92cadfr3m, child number 0
+-------------------------------------
+SELECT /*+ leading(e,d) use_nl(d) */ e.last_name, e.first_name,
+e.salary, e.job_id, d.department_name FROM employees e, departments d
+WHERE d.department_id = e.department_id AND e.employee_id = 100
+
+Plan hash value: 2782876085
+
+--------------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name          | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+--------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |               |      1 |        |      1 |00:00:00.01 |       4 |
+|   1 |  NESTED LOOPS                |               |      1 |      1 |      1 |00:00:00.01 |       4 |
+|   2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEES     |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  3 |    INDEX UNIQUE SCAN         | EMP_EMP_ID_PK |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   4 |   TABLE ACCESS BY INDEX ROWID| DEPARTMENTS   |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  5 |    INDEX UNIQUE SCAN         | DEPT_ID_PK    |      1 |      1 |      1 |00:00:00.01 |       1 |
+--------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("E"."EMPLOYEE_ID"=100)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+=============================================================================================
+
+<< table prefetch >> 
+- 디스크 I/O(physical I/O)를 수행하려면 비용이 많이 들기 때문에 한번I/O CALL이 
+  필요한 시점 곧이어 읽을 가능성이 block들을 data buffer cache에 미리 적재해 두는 기능.
+- Inner 쪽 non-unique index를 range scan시에 발생
+- db file sequential read event 대신 db file paralle reads wait event 발생
+- 힌트 : nlj_prefetch
+
+# optimizer_features_enable('10.2.0.5') : 버전 수정해서 실행하는 법(db가 10g 이고 oracle이 11g일때 오류가 발생할 수 있어서)
+
+SQL> SELECT /*+ optimizer_features_enable('10.2.0.5') leading(d,e) use_nl(e) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d 
+WHERE d.department_id = e.department_id 
+AND d.location_id = 2500; 
+
+
+SQL>  select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+---------------------------------------------------------------------------------------------------------------
+SQL_ID  dq70c9m1ab7q6, child number 0
+-------------------------------------
+
+
+SELECT /*+ optimizer_features_enable('10.2.0.5') leading(d,e) use_nl(e)
+*/ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d WHERE d.department_id = e.department_id
+AND d.location_id = 2500
+
+Plan hash value: 1096811146
+
+-------------------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+-------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |      0 |        |      0 |00:00:00.01 |       0 |
+|   1 |  TABLE ACCESS BY INDEX ROWID  | EMPLOYEES         |      1 |     10 |     34 |00:00:00.01 |      11 |
+|   2 |   NESTED LOOPS                |                   |      1 |     10 |     36 |00:00:00.01 |       7 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| DEPARTMENTS       |      1 |      1 |      1 |00:00:00.01 |       3 |
+|*  4 |     INDEX RANGE SCAN          | DEPT_LOCATION_IX  |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  5 |    INDEX RANGE SCAN           | EMP_DEPARTMENT_IX |      1 |     10 |     34 |00:00:00.01 |       4 |
+-------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."LOCATION_ID"=2500)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+<< batch i/o >>
+- inner 쪽 인덱스와 조인하면서 중간 결과 집합을 만든후에 inner쪽 테이블과 일괄(batch) 처리한다.
+- 힌트 : nlj_batching, no_nlj_batching(prefetch로 풀어주세요)
+
+# prefetch보다 진화된 방법으로 11g에 처음나온 기술(random I/O 를 줄이는 효과가 있다) 
+  *공식적인 용어는 아님(오라클엔 원래 정해진 용어는 없다는)
+
+# outer inner unique면 안돌아가고 inner가 non-unique 일때 잘 돌아감
+
+
+SQL> SELECT /*+ optimizer_features_enable('11.2.0.1.1') leading(d,e) use_nl(e) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d 
+WHERE d.department_id = e.department_id 
+AND d.location_id = 2500; 
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+--------------------------------------------------------------------------------------------------------------
+SQL_ID  au8qguv7fv1zv, child number 0
+-------------------------------------
+SELECT /*+ optimizer_features_enable('11.2.0.1.1') leading(d,e)
+use_nl(e) */ e.last_name, e.first_name, e.salary, e.job_id,
+d.department_name FROM employees e, departments d WHERE d.department_id
+= e.department_id AND d.location_id = 2500
+
+Plan hash value: 432925905
+
+-------------------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+-------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |      1 |        |     34 |00:00:00.01 |      11 |
+|   1 |  NESTED LOOPS                 |                   |      1 |        |     34 |00:00:00.01 |      11 |
+|   2 |   NESTED LOOPS                |                   |      1 |     10 |     34 |00:00:00.01 |       7 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| DEPARTMENTS       |      1 |      1 |      1 |00:00:00.01 |       3 |
+|*  4 |     INDEX RANGE SCAN          | DEPT_LOCATION_IX  |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  5 |    INDEX RANGE SCAN           | EMP_DEPARTMENT_IX |      1 |     10 |     34 |00:00:00.01 |       4 |
+|   6 |   TABLE ACCESS BY INDEX ROWID | EMPLOYEES         |     34 |     10 |     34 |00:00:00.01 |       4 |
+-------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."LOCATION_ID"=2500)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+# 3, 4 : outer
+
+SQL> SELECT /*+  leading(d,e) nlj_batching(e) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d 
+WHERE d.department_id = e.department_id 
+AND d.location_id = 2500; 
+
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+------------------------------------------------------------------------------------------------------------------------
+SQL_ID  6tfjzyjq2n0du, child number 0
+-------------------------------------
+SELECT /*+  leading(d,e) nlj_batching(e) */ e.last_name, e.first_name,
+e.salary, e.job_id, d.department_name FROM employees e, departments d
+WHERE d.department_id = e.department_id AND d.location_id = 2500
+
+Plan hash value: 432925905
+
+----------------------------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers | Reads  |
+----------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |      1 |        |     34 |00:00:00.01 |      11 |      4 |
+|   1 |  NESTED LOOPS                 |                   |      1 |        |     34 |00:00:00.01 |      11 |      4 |
+|   2 |   NESTED LOOPS                |                   |      1 |     10 |     34 |00:00:00.01 |       7 |      3 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| DEPARTMENTS       |      1 |      1 |      1 |00:00:00.01 |       3 |      2 |
+|*  4 |     INDEX RANGE SCAN          | DEPT_LOCATION_IX  |      1 |      1 |      1 |00:00:00.01 |       2 |      1 |
+|*  5 |    INDEX RANGE SCAN           | EMP_DEPARTMENT_IX |      1 |     10 |     34 |00:00:00.01 |       4 |      1 |
+|   6 |   TABLE ACCESS BY INDEX ROWID | EMPLOYEES         |     34 |     10 |     34 |00:00:00.01 |       4 |      1 |
+----------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."LOCATION_ID"=2500)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+
+SQL> SELECT /*+  leading(d,e) no_nlj_batching(e) */ e.last_name, e.first_name, e.salary, e.job_id, d.department_name
+FROM employees e, departments d 
+WHERE d.department_id = e.department_id 
+AND d.location_id = 2500; 
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------------------------
+SQL_ID  9gmdpvcvg1jhn, child number 0
+-------------------------------------
+SELECT /*+  leading(d,e) no_nlj_batching(e) */ e.last_name,
+e.first_name, e.salary, e.job_id, d.department_name FROM employees e,
+departments d WHERE d.department_id = e.department_id AND d.location_id
+= 2500
+
+Plan hash value: 1096811146
+
+-------------------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+-------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |      0 |        |      0 |00:00:00.01 |       0 |
+|   1 |  TABLE ACCESS BY INDEX ROWID  | EMPLOYEES         |      1 |     10 |     34 |00:00:00.01 |      11 |
+|   2 |   NESTED LOOPS                |                   |      1 |     10 |     36 |00:00:00.01 |       7 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| DEPARTMENTS       |      1 |      1 |      1 |00:00:00.01 |       3 |
+|*  4 |     INDEX RANGE SCAN          | DEPT_LOCATION_IX  |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  5 |    INDEX RANGE SCAN           | EMP_DEPARTMENT_IX |      1 |     10 |     34 |00:00:00.01 |       4 |
+-------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."LOCATION_ID"=2500)
+   5 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

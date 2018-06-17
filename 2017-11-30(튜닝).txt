@@ -1,0 +1,42 @@
+/* multiblock scan 시 몇개의 block가 올라가나? */
+show parameter db_file_multiblock_read_count;
+
+/* block 사이즈 (8k) */
+show parameter db_block_size;
+
+/* row당 rowid */
+select rowid, employee_id
+from hr.employees
+order by 2;
+
+--------------------------------------------
+
+SQLPLUS 접속
+
+> conn /as sysdba
+> @%ORACLE_HOME%\sqlplus\admin\plustrce.sql  <-- SQL문 실행 계획을 보려면 PLUSTRACE role 다운
+> grant plustrace to hr;
+> conn hr/hr
+> select * from session_roles;
+> set autotrace on /* 실행후 실행결과, 통계정보 출력 */
+> set linesize 200
+> select * from employees where employee_id = 100;
+> update employees set salary = 10000 where employee_id = 100;
+> /
+
+> set autotrace on explain             : sql문 실제 수행하고 결과와 함께 실행계획 출력
+> set autotrace on statistics           : sql문 실제 수행하고 결과와 함께 실행통계 출력
+> set autotrace traceonly              : sql문 실제 수행하고 결과는 출력하지 않고 실행계획, 실행통계정보 출력(traceonly 많이 씀)
+> set autotrace traceonly explain    : sql문 실제 수행하지 않고 실행계획만 출력(sqldeveloper에서 f10)
+> set autotrace off                       : autotrace 해지
+
+
+statistics
+
+ # select에 해당
+  - consistent gets : 총 읽은 block의 수(logical)
+  - physical reads : 물리적으로 읽은 block의 수
+
+ # DML에 해당
+  - db block gets
+  - physical reads : 물리적으로 읽은 block의 수

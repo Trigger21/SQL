@@ -1,0 +1,645 @@
+
+
+/* dbms_xplan */
+
+sql문을 수행 한 후 실행계획을 볼 수 있는 dbms_xplan.display_cursor 사용하려고 할때 필요한 권한
+
+
+SQL> conn sys/oracle as sysdba
+Connected.
+
+SQL> grant select on v_$session to hr;
+Grant succeeded.
+
+SQL> grant select on v_$sql to hr;
+Grant succeeded.
+
+SQL> grant select on v_$sql_plan to hr;
+Grant succeeded.
+
+SQL> grant select on v_$sql_plan_statistics to hr;
+Grant succeeded.
+
+SQL> grant select on V_$SQL_PLAN_STATISTICS_ALL to hr;
+Grant succeeded.
+
+
+SQL> conn hr/hr
+Connected.
+
+SQL> set pagesize 1000  <-- 1000행 마다 컬럼 출력하겠어
+SQL> set linesize 200 
+
+
+SQL> alter session set statistics_level = all; <-- 내 세션에서만(창이 꺼지면 바이바이)
+
+Session altered.
+
+SQL> select last_name, first_name, salary, job_id from employees where employee_id = 100;
+
+LAST_NAME                 FIRST_NAME                    SALARY JOB_ID
+------------------------- ------------------------- ---------- --------------------
+King                      Steven                       35138.4 AD_PRES
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+-------------------------------------------------------------------------------------------------------
+| Id  | Operation                   | Name          | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+-------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT            |               |      1 |        |      1 |00:00:00.01 |       2 |
+|   1 |  TABLE ACCESS BY INDEX ROWID| EMPLOYEES     |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  2 |   INDEX UNIQUE SCAN         | EMP_EMP_ID_PK |      1 |      1 |      1 |00:00:00.01 |       1 |
+-------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   2 - access("EMPLOYEE_ID"=100)
+
+
+# buffers : 총 읽은 block 수(= logical I/O)
+
+SQL> select last_name, first_name, salary, job_id from employees where to_number(employee_id) = 100;
+
+LAST_NAME                 FIRST_NAME                    SALARY JOB_ID
+------------------------- ------------------------- ---------- --------------------
+King                      Steven                       35138.4 AD_PRES
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+--------------------------------------------------------------------------------------------------
+| Id  | Operation         | Name      | Starts | E-Rows | A-Rows |   A-Time   | Buffers | Reads  |
+--------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT  |           |      1 |        |      1 |00:00:00.01 |       7 |      5 |
+|*  1 |  TABLE ACCESS FULL| EMPLOYEES |      1 |      1 |      1 |00:00:00.01 |       7 |      5 |
+--------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - filter(TO_NUMBER(TO_CHAR("EMPLOYEE_ID"))=100)
+
+
+# reads : 물리적으로 block을 읽어드린 수(메모리에 없었던 block의 수)
+
+=========================================================================================
+
+SQL> drop table hr.emp purge;
+
+Table dropped.
+
+SQL> drop table hr.dept purge;
+
+Table dropped.
+
+SQL> drop table hr.loc purge;
+
+Table dropped.
+
+
+SQL> create table  hr.emp 
+as
+select * from hr.employees;
+
+Table created.
+
+SQL> create table hr.dept
+as
+select * from hr.departments; 
+
+Table created.
+
+SQL> create table hr.loc
+as 
+select * from hr.locations;
+ 
+Table created.
+
+SQL>  select table_name, num_rows, blocks, avg_row_len, last_analyzed from user_tables where table_name in('EMP','DEPT','LOC');
+
+TABLE_NAME                                                     NUM_ROWS     BLOCKS AVG_ROW_LEN LAST_ANA
+------------------------------------------------------------ ---------- ---------- ----------- --------
+DEPT
+EMP
+LOC
+
+
+
+
+[문제101] 테이블 통계 수집을 하시고 컬럼 정보를 확인 하세요.
+
+SQL> conn sys/oracle as sysdba
+Connected.
+
+SQL> exec dbms_stats.gather_table_stats('hr', 'emp') <-- gathering해서 통계분석 가능하도록
+
+PL/SQL procedure successfully completed.
+
+SQL> exec dbms_stats.gather_table_stats('hr', 'dept')
+
+PL/SQL procedure successfully completed.
+
+SQL> exec dbms_stats.gather_table_stats('hr', 'loc')
+
+PL/SQL procedure successfully completed.
+
+
+SQL> select table_name, num_rows, blocks, avg_row_len, last_analyzed from user_tables where table_name in('EMP','DEPT','
+
+TABLE_NAME             NUM_ROWS     BLOCKS AVG_ROW_LEN LAST_ANA
+-------------------- ---------- ---------- ----------- --------
+DEPT                         27          4          21 17/12/04
+EMP                         107          5          69 17/12/04
+LOC                          23          4          49 17/12/04
+
+
+
+[문제102] SQL문장의 실행계획을 확인 한 후 nested loop join 으로 튜닝하세요.
+
+SQL>  alter session set statistics_level = all;
+
+Session altered.
+
+SQL> select e.last_name, e.job_id, d.department_name, l.city
+from emp e, dept d, loc l
+where e.department_id = d.department_id
+and d.location_id = l.location_id
+and e.employee_id = 100;
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+-------------------------------------------------------------------------------------------------------------------
+| Id  | Operation             | Name | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+-------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |      |      1 |        |      1 |00:00:00.01 |       8 |       |       |          |
+|*  1 |  HASH JOIN            |      |      1 |      1 |      1 |00:00:00.01 |       8 |   927K|   927K| 1255K (0)|
+|   2 |   MERGE JOIN CARTESIAN|      |      1 |     23 |     23 |00:00:00.01 |       5 |       |       |          |
+|*  3 |    TABLE ACCESS FULL  | EMP  |      1 |      1 |      1 |00:00:00.01 |       3 |       |       |          |
+|   4 |    BUFFER SORT        |      |      1 |     23 |     23 |00:00:00.01 |       2 |  2048 |  2048 | 2048  (0)|
+|   5 |     TABLE ACCESS FULL | LOC  |      1 |     23 |     23 |00:00:00.01 |       2 |       |       |          |
+|   6 |   TABLE ACCESS FULL   | DEPT |      1 |     27 |     27 |00:00:00.01 |       3 |       |       |          |
+-------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "D"."LOCATION_ID"="L"."LOCATION_ID")
+   3 - filter("E"."EMPLOYEE_ID"=100)
+
+
+
+SQL> create unique index hr.emp_idx on hr.emp(employee_id);
+
+Index created.
+
+SQL> alter table hr.emp add constraint emp_pk primary key(employee_id) using index hr.emp_idx;
+
+Table altered.
+
+# index name를 별도로 지정하고 싶을때 사용하는 방법
+# pk 생성과 동시에 unique index가 생성됨
+
+SQL> create unique index hr.dept_idx on hr.dept(department_id);
+
+Index created.
+
+SQL> alter table hr.dept add constraint dept_pk primary key(department_id) using index hr.dept_idx;
+
+Table altered.
+
+SQL> create unique index hr.loc_idx on hr.loc(location_id);
+
+Index created.
+
+SQL> alter table hr.loc add constraint loc_pk primary key(location_id) using index hr.loc_idx;
+
+Table altered.
+
+
+SQL> select a.table_name, a.constraint_name, b.column_name, a.constraint_type, a.search_condition, a.r_constraint_name,a
+     from user_constraints a, user_cons_columns b
+     where a.constraint_name = b.constraint_name
+     and a.table_name in ('EMP','DEPT','LOC');
+
+TABLE_NAME           CONSTRAINT_NAME COLUMN_NAME     CO SEARCH_CONDITION                    R_CONSTRAI INDEX_NAME
+-------------------- --------------- --------------- -- ----------------------------------- ---------- -----------------
+DEPT                 SYS_C007365     DEPARTMENT_NAME C  "DEPARTMENT_NAME" IS NOT NULL
+DEPT                 DEPT_PK         DEPARTMENT_ID   P                                                 DEPT_IDX
+EMP                  SYS_C007361     LAST_NAME       C  "LAST_NAME" IS NOT NULL
+EMP                  SYS_C007362     EMAIL           C  "EMAIL" IS NOT NULL
+EMP                  SYS_C007363     HIRE_DATE       C  "HIRE_DATE" IS NOT NULL
+EMP                  SYS_C007364     JOB_ID          C  "JOB_ID" IS NOT NULL
+EMP                  EMP_PK          EMPLOYEE_ID     P                                                 EMP_IDX
+LOC                  SYS_C007366     CITY            C  "CITY" IS NOT NULL
+LOC                  LOC_PK          LOCATION_ID     P                                                 LOC_IDX
+
+
+
+SQL> select ix.table_name, ix.index_name, ix.uniqueness, ic.column_name
+     from user_indexes ix, user_ind_columns ic
+     where ix.index_name = ic.index_name
+     and ix.table_name in ('EMP','DEPT','LOC');
+
+TABLE_NAME           INDEX_NAME           UNIQUENESS         COLUMN_NAME
+-------------------- -------------------- ------------------ ---------------
+DEPT                 DEPT_IDX             UNIQUE             DEPARTMENT_ID
+EMP                  EMP_IDX              UNIQUE             EMPLOYEE_ID
+LOC                  LOC_IDX              UNIQUE             LOCATION_ID
+
+SQL> select e.last_name, e.job_id, d.department_name, l.city
+     from emp e, dept d, loc l
+     where e.department_id = d.department_id
+     and d.location_id = l.location_id
+     and e.employee_id = 100;
+
+LAST_NAME                                          JOB_ID               DEPARTMENT_NAME
+-------------------------------------------------- -------------------- ------------------------------------------------
+King                                               AD_PRES              Executive
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+----------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name     | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+----------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |          |      1 |        |      1 |00:00:00.01 |       6 |
+|   1 |  NESTED LOOPS                 |          |      1 |      1 |      1 |00:00:00.01 |       6 |
+|   2 |   NESTED LOOPS                |          |      1 |      1 |      1 |00:00:00.01 |       4 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| EMP      |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  4 |     INDEX UNIQUE SCAN         | EMP_IDX  |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   5 |    TABLE ACCESS BY INDEX ROWID| DEPT     |      1 |     27 |      1 |00:00:00.01 |       2 |
+|*  6 |     INDEX UNIQUE SCAN         | DEPT_IDX |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   7 |   TABLE ACCESS BY INDEX ROWID | LOC      |      1 |     23 |      1 |00:00:00.01 |       2 |
+|*  8 |    INDEX UNIQUE SCAN          | LOC_IDX  |      1 |      1 |      1 |00:00:00.01 |       1 |
+----------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("E"."EMPLOYEE_ID"=100)
+   6 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+   8 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+
+
+
+
+
+SQL> select /*+ leading(e,d,l) use_nl(d) use_nl(l) */ e.last_name, e.job_id, d.department_name, l.city
+     from emp e, dept d, loc l
+     where e.department_id = d.department_id
+     and d.location_id = l.location_id
+     and e.employee_id = 100;
+
+LAST_NAME                                          JOB_ID               DEPARTMENT_NAME
+-------------------------------------------------- -------------------- ------------------------------------------------
+King                                               AD_PRES              Executive
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+----------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name     | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+----------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |          |      1 |        |      1 |00:00:00.01 |       6 |
+|   1 |  NESTED LOOPS                 |          |      1 |      1 |      1 |00:00:00.01 |       6 |
+|   2 |   NESTED LOOPS                |          |      1 |      1 |      1 |00:00:00.01 |       4 |
+|   3 |    TABLE ACCESS BY INDEX ROWID| EMP      |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  4 |     INDEX UNIQUE SCAN         | EMP_IDX  |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   5 |    TABLE ACCESS BY INDEX ROWID| DEPT     |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  6 |     INDEX UNIQUE SCAN         | DEPT_IDX |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   7 |   TABLE ACCESS BY INDEX ROWID | LOC      |      1 |      1 |      1 |00:00:00.01 |       2 |
+|*  8 |    INDEX UNIQUE SCAN          | LOC_IDX  |      1 |      1 |      1 |00:00:00.01 |       1 |
+----------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("E"."EMPLOYEE_ID"=100)
+   6 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+   8 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+
+
+
+
+
+# 주의사항(아래)
+
+SQL> select /*+ leading(l,d,e) use_nl(d) use_nl(e) */ e.last_name, e.job_id, d.department_name, l.city
+     from emp e, dept d, loc l
+     where e.department_id = d.department_id
+     and d.location_id = l.location_id
+     and e.employee_id = 100;
+
+LAST_NAME                                          JOB_ID               DEPARTMENT_NAME
+-------------------------------------------------- -------------------- ------------------------------------------------
+King                                               AD_PRES              Executive
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+--------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name    | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+--------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |         |      1 |        |      1 |00:00:00.01 |      81 |
+|   1 |  NESTED LOOPS                |         |      1 |        |      1 |00:00:00.01 |      81 |
+|   2 |   NESTED LOOPS               |         |      1 |      1 |     27 |00:00:00.01 |      54 |
+|   3 |    NESTED LOOPS              |         |      1 |     27 |     27 |00:00:00.01 |      50 |
+|   4 |     TABLE ACCESS FULL        | LOC     |      1 |     23 |     23 |00:00:00.01 |       3 |
+|*  5 |     TABLE ACCESS FULL        | DEPT    |     23 |      1 |     27 |00:00:00.01 |      47 |
+|*  6 |    INDEX UNIQUE SCAN         | EMP_IDX |     27 |      1 |     27 |00:00:00.01 |       4 |
+|*  7 |   TABLE ACCESS BY INDEX ROWID| EMP     |     27 |      1 |      1 |00:00:00.01 |      27 |
+--------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   5 - filter("D"."LOCATION_ID"="L"."LOCATION_ID")
+   6 - access("E"."EMPLOYEE_ID"=100)
+   7 - filter("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+
+
+# nested loop join 필수조건은 index의 생성여부
+# 실행계획 세울때 통계정보를 이용하고 없으면 게더링하자(다이나믹 샘플 별로 좋지는 않다)
+
+
+
+=================================================================================================
+
+
+
+ /* sort merge join */
+
+- 조인되는 건수가 많을때 유리하다. sort 에 대한 성능문제가 발생할수있다.
+- 힌트 : use_merge
+
+
+SQL> select  /*+ leading(d,e) use_merge(e) */ d.department_id, d.department_name, e.last_name, e.salary
+from departments d, employees e
+where d.department_id = e.department_id;
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+---------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name        | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+---------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |             |      1 |        |    106 |00:00:00.01 |      19 |       |       |          |
+|   1 |  MERGE JOIN                  |             |      1 |    106 |    106 |00:00:00.01 |      19 |       |       |          |
+|   2 |   TABLE ACCESS BY INDEX ROWID| DEPARTMENTS |      1 |     27 |     27 |00:00:00.01 |      12 |       |       |          |-> first
+|   3 |    INDEX FULL SCAN           | DEPT_ID_PK  |      1 |     27 |     27 |00:00:00.01 |       6 |       |       |          |
+|*  4 |   SORT JOIN                  |             |     27 |    107 |    106 |00:00:00.01 |       7 |  6144 |  6144 | 6144  (0)|
+|   5 |    TABLE ACCESS FULL         | EMPLOYEES   |      1 |    107 |    107 |00:00:00.01 |       7 |       |       |          |-> second
+---------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+       filter("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+# 3 : unique index 걸려있음, 2 : dept_name 찾아야 되서
+
+
+SQL> select  /*+ leading(e,d) use_merge(d) */ d.department_id, d.department_name, e.last_name, e.salary
+from departments d, employees e
+where d.department_id = e.department_id ;
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+---------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation           | Name        | Starts | E-Rows | A-Rows |   A-Time   | Buffers | Reads  |  OMem |  1Mem | Used-Mem | <-- used-men : 실제 메모리
+---------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT    |             |      1 |        |    106 |00:00:00.01 |      14 |      5 |       |       |          |
+|   1 |  MERGE JOIN         |             |      1 |    106 |    106 |00:00:00.01 |      14 |      5 |       |       |          |
+|   2 |   SORT JOIN         |             |      1 |    107 |    107 |00:00:00.01 |       7 |      0 |  6144 |  6144 | 6144  (0)| <-- (n) : 디스크로 내려간 회수
+|   3 |    TABLE ACCESS FULL| EMPLOYEES   |      1 |    107 |    107 |00:00:00.01 |       7 |      0 |       |       |          |
+|*  4 |   SORT JOIN         |             |    107 |     27 |    106 |00:00:00.01 |       7 |      5 |  2048 |  2048 | 2048  (0)|
+|   5 |    TABLE ACCESS FULL| DEPARTMENTS |      1 |     27 |     27 |00:00:00.01 |       7 |      5 |       |       |          |
+---------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   4 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+       filter("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+# 주의 : 1st는 1족 집합이 되어야 한다. 잘못되면 위와 같이 된다.
+
+
+
+SQL> select  /*+ leading(l,d,e) use_merge(d) use_merge(e) */ d.department_id, d.department_name, e.last_name, e.salary, l.city, l.street_address
+from locations l, departments d, employees e
+where d.department_id = e.department_id 
+and l.location_id = d.location_id;
+
+SQL>  select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+--------------------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name        | Starts | E-Rows | A-Rows |   A-Time   | Buffers | Reads  |  OMem |  1Mem | Used-Mem |
+--------------------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |             |      1 |        |    106 |00:00:00.01 |      16 |      1 |       |       |          |
+|   1 |  MERGE JOIN                    |             |      1 |    106 |    106 |00:00:00.01 |      16 |      1 |       |       |          |
+|   2 |   SORT JOIN                    |             |      1 |     27 |     27 |00:00:00.01 |       9 |      1 |  2048 |  2048 | 2048  (0)|
+|   3 |    MERGE JOIN                  |             |      1 |     27 |     27 |00:00:00.01 |       9 |      1 |       |       |          |
+|   4 |     TABLE ACCESS BY INDEX ROWID| LOCATIONS   |      1 |     23 |     19 |00:00:00.01 |       2 |      1 |       |       |          |
+|   5 |      INDEX FULL SCAN           | LOC_ID_PK   |      1 |     23 |     19 |00:00:00.01 |       1 |      0 |       |       |          |
+|*  6 |     SORT JOIN                  |             |     19 |     27 |     27 |00:00:00.01 |       7 |      0 |  2048 |  2048 | 2048  (0)|
+|   7 |      TABLE ACCESS FULL         | DEPARTMENTS |      1 |     27 |     27 |00:00:00.01 |       7 |      0 |       |       |          |
+|*  8 |   SORT JOIN                    |             |     27 |    107 |    106 |00:00:00.01 |       7 |      0 |  6144 |  6144 | 6144  (0)|
+|   9 |    TABLE ACCESS FULL           | EMPLOYEES   |      1 |    107 |    107 |00:00:00.01 |       7 |      0 |       |       |          |
+--------------------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   6 - access("L"."LOCATION_ID"="D"."LOCATION_ID")
+       filter("L"."LOCATION_ID"="D"."LOCATION_ID")
+   8 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+       filter("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+
+SQL> select  /*+ leading(l,d,e) use_nl(d) use_nl(e) */ d.department_id, d.department_name, e.last_name, e.salary, l.city, l.street_address
+from locations l, departments d, employees e
+where d.department_id = e.department_id 
+and l.location_id = d.location_id;
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+-----------------------------------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers | Reads  |
+-----------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |                   |      1 |        |    106 |00:00:00.01 |      57 |      7 |
+|   1 |  NESTED LOOPS                  |                   |      1 |        |    106 |00:00:00.01 |      57 |      7 |
+|   2 |   NESTED LOOPS                 |                   |      1 |    106 |    106 |00:00:00.01 |      42 |      7 |
+|   3 |    NESTED LOOPS                |                   |      1 |     27 |     27 |00:00:00.01 |      28 |      6 |
+|   4 |     TABLE ACCESS FULL          | LOCATIONS         |      1 |     23 |     23 |00:00:00.01 |      12 |      5 |
+|   5 |     TABLE ACCESS BY INDEX ROWID| DEPARTMENTS       |     23 |      1 |     27 |00:00:00.01 |      16 |      1 |
+|*  6 |      INDEX RANGE SCAN          | DEPT_LOCATION_IX  |     23 |      4 |     27 |00:00:00.01 |      11 |      1 |
+|*  7 |    INDEX RANGE SCAN            | EMP_DEPARTMENT_IX |     27 |     10 |    106 |00:00:00.01 |      14 |      1 |
+|   8 |   TABLE ACCESS BY INDEX ROWID  | EMPLOYEES         |    106 |      4 |    106 |00:00:00.01 |      15 |      0 |
+-----------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   6 - access("L"."LOCATION_ID"="D"."LOCATION_ID")
+   7 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+# nested loop 아무리 index 설계가 잘 되어도, 비조인술어가 없으면 별로다.
+
+
+
+===========================================================================================
+
+
+
+ /* hash join */
+ 
+- 조인되는 건수가 많을때 유리하다. 주로 full table scan 으로 수행된다.
+- 힌트 : use_hash
+
+
+SQL> select  /*+ leading(d,e) use_hash(e) */ d.department_id, d.department_name, e.last_name, e.salary
+from departments d, employees e
+where d.department_id = e.department_id ;  
+
+SQL>  select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+
+-----------------------------------------------------------------------------------------------------------------------
+| Id  | Operation          | Name        | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+-----------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |             |      1 |        |    106 |00:00:00.01 |      21 |       |       |          |
+|*  1 |  HASH JOIN         |             |      1 |    106 |    106 |00:00:00.01 |      21 |   862K|   862K| 1185K (0)|
+|   2 |   TABLE ACCESS FULL| DEPARTMENTS |      1 |     27 |     27 |00:00:00.01 |       7 |       |       |          |-> build(hash table 생성)
+|   3 |   TABLE ACCESS FULL| EMPLOYEES   |      1 |    107 |    107 |00:00:00.01 |      14 |       |       |          |-> probe
+-----------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("D"."DEPARTMENT_ID"="E"."DEPARTMENT_ID")
+
+
+# 핵심 : 1족 집합을 build로 가는게 좋다.(그것이 진리요)
+# 대용량일 수록 효과가 빛을 발한다.
+# 낮시간 : nested loop join, 밤시간 : hash join
+
+
+SQL> select  /*+ leading(r,c,l,d,e) use_hash(c) use_hash(l)  use_hash(d) use_hash(e) */ 
+e.employee_id, e.last_name, d.department_name, l.city, l.street_address, c.country_name, r.region_name
+from employees e, departments d, locations l, countries c, regions r
+where e.department_id = d.department_id
+and d.location_id = l.location_id
+and l.country_id = c.country_id
+and r.region_id = c.region_id; 
+
+SQL>  select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation             | Name            | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |                 |      1 |        |    106 |00:00:00.01 |      36 |       |       |          |
+|*  1 |  HASH JOIN            |                 |      1 |    106 |    106 |00:00:00.01 |      36 |   728K|   728K| 1230K (0)|
+|*  2 |   HASH JOIN           |                 |      1 |     27 |     27 |00:00:00.01 |      22 |   747K|   747K| 1118K (0)|
+|*  3 |    HASH JOIN          |                 |      1 |     23 |     23 |00:00:00.01 |      15 |   816K|   816K| 1204K (0)|
+|*  4 |     HASH JOIN         |                 |      1 |     25 |     25 |00:00:00.01 |       8 |   870K|   870K|  742K (0)|
+|   5 |      TABLE ACCESS FULL| REGIONS         |      1 |      4 |      4 |00:00:00.01 |       7 |       |       |          |
+|   6 |      INDEX FULL SCAN  | COUNTRY_C_ID_PK |      1 |     25 |     25 |00:00:00.01 |       1 |       |       |          |
+|   7 |     TABLE ACCESS FULL | LOCATIONS       |      1 |     23 |     23 |00:00:00.01 |       7 |       |       |          |
+|   8 |    TABLE ACCESS FULL  | DEPARTMENTS     |      1 |     27 |     27 |00:00:00.01 |       7 |       |       |          |
+|   9 |   TABLE ACCESS FULL   | EMPLOYEES       |      1 |    107 |    107 |00:00:00.01 |      14 |       |       |          |
+------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+   2 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+   3 - access("L"."COUNTRY_ID"="C"."COUNTRY_ID")
+   4 - access("R"."REGION_ID"="C"."REGION_ID")
+
+
+
+SQL> select  /*+ leading(d,e,l,c,r) use_hash(e) use_hash(l)  use_hash(c) use_hash(r) */ 
+e.employee_id, e.last_name, d.department_name, l.city, l.street_address, c.country_name, r.region_name
+from employees e, departments d, locations l, countries c, regions r
+where e.department_id = d.department_id
+and d.location_id = l.location_id
+and l.country_id = c.country_id
+and r.region_id = c.region_id; 
+
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+
+------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation             | Name            | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |                 |      1 |        |    106 |00:00:00.01 |      34 |       |       |          |
+|*  1 |  HASH JOIN            |                 |      1 |    106 |    106 |00:00:00.01 |      34 |   870K|   870K|  713K (0)|
+|   2 |   TABLE ACCESS FULL   | REGIONS         |      1 |      4 |      4 |00:00:00.01 |       7 |       |       |          |
+|*  3 |   HASH JOIN           |                 |      1 |    106 |    106 |00:00:00.01 |      27 |   862K|   862K| 1228K (0)|
+|   4 |    INDEX FULL SCAN    | COUNTRY_C_ID_PK |      1 |     25 |     25 |00:00:00.01 |       1 |       |       |          |
+|*  5 |    HASH JOIN          |                 |      1 |    106 |    106 |00:00:00.01 |      26 |   812K|   812K|  650K (0)|
+|*  6 |     HASH JOIN         |                 |      1 |    106 |    106 |00:00:00.01 |      14 |   836K|   836K| 1224K (0)|
+|   7 |      TABLE ACCESS FULL| DEPARTMENTS     |      1 |     27 |     27 |00:00:00.01 |       7 |       |       |          |
+|   8 |      TABLE ACCESS FULL| EMPLOYEES       |      1 |    107 |    107 |00:00:00.01 |       7 |       |       |          |
+|   9 |     TABLE ACCESS FULL | LOCATIONS       |      1 |     23 |     23 |00:00:00.01 |      12 |       |       |          |
+------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("R"."REGION_ID"="C"."REGION_ID")
+   3 - access("L"."COUNTRY_ID"="C"."COUNTRY_ID")
+   5 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+   6 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+
+
+/* swap_join_inputs */ 
+
+- swap_join_inputs(l) : l을 build로 바꿔줘~(순서상 probe가 되어버려서)
+
+
+SQL> select  /*+ leading(d,e,l,c,r) use_hash(e) use_hash(l)  use_hash(c) use_hash(r)
+	   	 swap_join_inputs(l)
+	    */ 
+e.employee_id, e.last_name, d.department_name, l.city, l.street_address, c.country_name, r.region_name
+from employees e, departments d, locations l, countries c, regions r
+where e.department_id = d.department_id
+and d.location_id = l.location_id
+and l.country_id = c.country_id
+and r.region_id = c.region_id; 
+
+
+SQL> select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+------------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation             | Name            | Starts | E-Rows | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+------------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT      |                 |      1 |        |    106 |00:00:00.01 |      36 |       |       |          |
+|*  1 |  HASH JOIN            |                 |      1 |    106 |    106 |00:00:00.01 |      36 |   870K|   870K|  711K (0)|
+|   2 |   TABLE ACCESS FULL   | REGIONS         |      1 |      4 |      4 |00:00:00.01 |       7 |       |       |          |
+|*  3 |   HASH JOIN           |                 |      1 |    106 |    106 |00:00:00.01 |      29 |   862K|   862K| 1200K (0)|
+|   4 |    INDEX FULL SCAN    | COUNTRY_C_ID_PK |      1 |     25 |     25 |00:00:00.01 |       1 |       |       |          |
+|*  5 |    HASH JOIN          |                 |      1 |    106 |    106 |00:00:00.01 |      28 |   774K|   774K| 1084K (0)|
+|   6 |     TABLE ACCESS FULL | LOCATIONS       |      1 |     23 |     23 |00:00:00.01 |       7 |       |       |          |
+|*  7 |     HASH JOIN         |                 |      1 |    106 |    106 |00:00:00.01 |      21 |   836K|   836K| 1210K (0)|
+|   8 |      TABLE ACCESS FULL| DEPARTMENTS     |      1 |     27 |     27 |00:00:00.01 |       7 |       |       |          |
+|   9 |      TABLE ACCESS FULL| EMPLOYEES       |      1 |    107 |    107 |00:00:00.01 |      14 |       |       |          |
+------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   1 - access("R"."REGION_ID"="C"."REGION_ID")
+   3 - access("L"."COUNTRY_ID"="C"."COUNTRY_ID")
+   5 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+   7 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
